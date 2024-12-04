@@ -1,0 +1,110 @@
+pipeline {
+    agent any
+    environment {
+        SCANNER_HOME = tool 'SonarQube Scanner'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()  // Clean the workspace before starting
+            }
+        }
+
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main',
+                url: 'https://github.com/pavan-3000/3-tier-app-deploy'
+            }
+        }
+
+        // Uncomment if SonarQube is needed
+        /* stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                    ${env.SCANNER_HOME}/bin/sonar-scanner \
+                    -Dsonar.projectName=3-tier-app \
+                    -Dsonar.projectKey=3-tier-app
+                    '''
+                }
+            }
+        } */
+
+        stage('Trivy Scan') {
+            steps {
+                sh "trivy fs . > trivy-scan.txt"  // Run Trivy scan and store output in trivy-scan.txt
+            }
+        }
+
+        stage('Docker Build for Frontend') {
+            steps {
+                dir('Application-Code/frontend') {
+                    script {
+                        try {
+                            sh 'docker system prune -f || echo "System prune skipped."'
+                            sh 'docker container prune -f || echo "Container prune skipped."'
+                            sh 'docker build -t three-tier-frontend .'
+                        } catch (Exception e) {
+                            echo "Error: ${e.message}"
+                            currentBuild.result = 'FAILURE'  // Mark the build as failed
+                            throw e  // Re-throw the exception to stop the pipeline
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('create ecr repo') {
+            steps {
+                withCredentials([string(credentialsId: 'access_key', variable: 'acces_key'), string(credentialsId: 'secret_key', variable: 'secret_key')]) {
+                    sh '''
+                    aws configure set aws_access_key_id $acces_key
+                    aws configure set aws_secret_access_key $secret_key
+                    aws ecr describe-repositories --repository-names three-tier-frontend --region ap-south-1 || \
+                    aws ecr create-repository --repository-name three-tier-frontend --region ap-south-1
+                    '''
+                }
+            }
+        }
+        stage('tag ecr repo') {
+            steps {
+                withCredentials([string(credentialsId: 'access_key', variable: 'acces_key'), string(credentialsId: 'secret_key', variable: 'secret_key')]) {
+                    sh '''
+                    aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 339713101508.dkr.ecr.ap-south-1.amazonaws.com
+                    docker tag three-tier-frontend:latest 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:${BUILD_NUMBER}
+                    docker tag three-tier-frontend:latest 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:latest
+                    '''
+                }
+            }
+        }
+
+        stage('push ecr repo') {
+            steps {
+                withCredentials([string(credentialsId: 'access_key', variable: 'acces_key'), string(credentialsId: 'secret_key', variable: 'secret_key')]) {
+                    sh '''
+                    docker push 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:${BUILD_NUMBER}
+                    docker push 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:latest
+                    '''
+                }
+            }
+        }
+        stage('remove ecr repo') {
+            steps {
+                withCredentials([string(credentialsId: 'access_key', variable: 'acces_key'), string(credentialsId: 'secret_key', variable: 'secret_key')]) {
+                    sh '''
+                    docker rmi 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:${BUILD_NUMBER}
+                    docker rmi 339713101508.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend:latest
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            cleanWs()  // Clean the workspace only if the build fails
+        }
+    }
+}
